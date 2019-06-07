@@ -15,7 +15,6 @@
 # along with RedPitaya-DSP. If not, see <http://www.gnu.org/licenses/>.
 
 #! /usr/bin/python
-from __future__ import print_function
 
 import Pyro4
 import subprocess
@@ -128,10 +127,12 @@ class Runner(object):
             time.strftime('-%Y%m%d-%H:%M:%S') + '.txt')
         try:
             with open(self.filename, 'w') as f:
+                print('actiontable is', actiontable)
+                print('action table was that')
                 for row in actiontable:
                     actTime, pinNumber, actionValue = row
                     timeNanoSec = int(actTime*1e3) # convert to ns
-                    finalRow = timeNanoSec, pinNumber, actionValue
+                    finalRow = (timeNanoSec, pinNumber, actionValue)
                     print('time:{} pin:{} action:{}'.format(*finalRow))
                     print('{} {} {}'.format(*finalRow), file=f)
             self.writtenActionTable = True
@@ -173,7 +174,7 @@ class Executor(object):
         self.board.write(Board.offsets['direct_pinP'], 0xFF)
         self.board.write(Board.offsets['direct_pinN'], 0xFF)
 
-    def abort(self):
+    def Abort(self):
         # kill the server process
         self.runner.abort()
         # The RedPitaya-DSP has a handler for SIGINT that cleans up
@@ -185,7 +186,7 @@ class Executor(object):
             # Sort so that the longest exposure time comes last.
             lightTimePairs.sort(key = lambda a: a[1])
             curDigital = cameras + sum([p[0] for p in lightTimePairs])
-            self.writeDigital(curDigital)
+            self.WriteDigital(curDigital)
             print('Start with {}'.format(curDigital))
             totalTime = lightTimePairs[-1][1]
             curTime = 0
@@ -195,17 +196,17 @@ class Executor(object):
                 if waitTime > 0:
                     busy_wait(waitTime/1000.)
                 curDigital -= line
-                self.writeDigital(curDigital)
+                self.WriteDigital(curDigital)
                 curTime += waitTime
                 print('At {} set {}'.format(curTime, curDigital))
             # Wait for the final timepoint to close shutters.
             if totalTime - curTime:
                 busy_wait( (totalTime - curTime)/1000. )
             print('Finally at {} set {}'.format(totalTime, 0))
-            self.writeDigital(0)
+            self.WriteDigital(0)
         else:
-            self.writeDigital(cameras) # "expose"
-            self.writeDigital(0)
+            self.WriteDigital(cameras) # "expose"
+            self.WriteDigital(0)
 
     # Volts can be between -1 to 1 [-8192 to 8191]
     def convertVoltsToADUs(volts, maxVoltage = 1):
@@ -214,7 +215,7 @@ class Executor(object):
         return int(volts*8192/maxVoltage)
 
     # expect value in analog-to-digital-units (ADUs)
-    def writeAnalog(self, channel, value):
+    def MoveAbsoluteADU(self, channel, value):
         if channel == 0:
             self.board.write(Board.offsets['asg_channelA'], value)
         elif channel == 1:
@@ -222,7 +223,7 @@ class Executor(object):
         else:
             raise Exception('Unexpected analog channel! (0 or 1)')
 
-    def readAnalog(self, channel):
+    def ReadPosition(self, channel):
         if channel == 0:
             return int(self.board.read(Board.offsets['asg_channelA']))
         elif channel == 1:
@@ -230,22 +231,13 @@ class Executor(object):
         else:
             raise Exception('Unexpected analog channel! (0 or 1)')
 
-    def writeDigital(self, value):
+    def WriteDigital(self, value):
         dP = value & int('11111111', 2)
         dN = (value & int('1111111100000000', 2)) >> 8
         self.board.write(Board.offsets['out_pinP'], dP)
         self.board.write(Board.offsets['out_pinN'], dN)
 
-    def writeDigital(self, line, value):
-        toWrite = value & int('11111111', 2)
-        if line == 0:
-            self.board.write(Board.offsets['out_pinP'], toWrite)
-        elif line == 1:
-            self.board.write(Board.offsets['out_pinN'], toWrite)
-        else:
-            raise Exception('Unexpected digital pin line! (0 or 1)')
-
-    def readDigital(self, line):
+    def ReadDigital(self, line=0):
         if line == 0:
             return self.board.read(Board.offsets['out_pinP'])
         elif line == 1:
@@ -259,33 +251,65 @@ class Executor(object):
     def readLed(self, leds):
         self.board.read(Board.offsets['led'])
 
-    def setProfile(self, times, pins, values):
-        print('Setting action table...', end=' ')
-        self.actiontable = zip(times, pins, values)
-        print('done')
+    def InitProfile(self, numReps):
+        # I'm pretty sure this does not zero the prev values.
+        # is it for allocating space?
+        # self.times, self.digitals, self.analogA, self.analogB = [], [], [], []
+        pass
 
-    def setProfile(self, table, setup = None):
-        print('Setting action table...', end=' ')
-        if setup:
-            times, pins, values = [], [], []
-            for time, handler, action in table:
-                if handler in setup.handlerToDigitalLine:
-                    pins.append(setup.handlerToDigitalLine[handler])
-                    values.append(action)
-                elif handler in setup.handlerToAnalogLine:
-                    pins.append(setup.handlerToAnalogLine[handler])
-                    values.append(Executor.convertVoltsToADUs(action))
-                else:
-                    raise RuntimeError(
-                        "Unhandled handler when generating profile: %s"
-                        % handler)
-                times.append(float(time))
-            self.actiontable = zip(times, pins, values)
+    def profileSet(self, profileStr, digitals, *analogs):
+        print("profileset called with")
+        print("analog0", analogs[0],
+              "times", list(zip(*analogs[0]))[0],
+              "vals", list(zip(*analogs[0]))[1])
+        # This is downloading the action table
+        # digitals is numpy.zeros((len(times), 2), dtype = numpy.uint32),
+        # starting at 0 -> [times for digital signal changes, digital lines]
+        # analogs is a list of analog lines and the values to put on them at each time
+        # digitals = list of lists. sublist is a time, line pair
+        # then 4 analog lines. also list of time: value pairs.
+        Dtimes, Dvals = zip(*digitals)
+        if len(analogs) > 0:
+            Atimes, Avals = zip(*analogs[0])
         else:
-            self.actiontable = table
-        print('done')
+            Atimes, Avals = [], []
+        if len(analogs) > 0:
+            Btimes, Bvals = zip(*analogs[1])
+        else:
+            Btimes, Bvals = [], []
 
-    def downloadProfile(self, name = None): # This saves the action table
+        Dtimes = list(Dtimes)
+        Atimes = list(Atimes)
+        Btimes = list(Btimes)
+
+        print("dt:{},\n at:{},\n bt:{}".format(Dtimes, Atimes, Btimes))
+        print()
+        print()
+        print("dv:{},\n av:{},\n bv:{}".format(Dvals, Avals, Bvals))
+
+        times, digitals, analogA, analogB = [], [], [], []
+        times = sorted(set(Dtimes+Atimes+Btimes))
+        for timepoint in times:
+            for outline, inval, timesForLine in [(digitals, Dvals, Dtimes),
+                                                 (analogA,  Avals, Atimes),
+                                                 (analogB,  Bvals, Btimes)]:
+                if timepoint in timesForLine:
+                    outline.append(inval[timesForLine.index(timepoint)])
+                else:
+                    prevValue = outline[-1] if outline else 0
+                    outline.append(prevValue) # the last value
+
+        # the DSP 'baselines' the analog values the the first value in the analogs
+        # when an experiment is started. We don't do this, we just write the values
+        # so add the first analog value back on
+        analogA = [analogAi+analogA[0] for analogAi in analogA]
+        analogB = [analogBi+analogB[0] for analogBi in analogB]
+
+        print("sort")
+        self.actiontable = sorted(zip(times, digitals, analogA, analogB))
+        print("sorted")
+
+    def DownloadProfile(self, name = None): # This saves the action table
         self.runner.load(self.actiontable, name)
 
     def trigCollect(self, wait = True):
@@ -293,7 +317,7 @@ class Executor(object):
         if wait:
             process.wait()
         if self.clientConnection:
-            retVal = (100, [self.readAnalog(0), self.readAnalog(1), 0, 0])
+            retVal = (100, [self.ReadPosition(0), self.ReadPosition(1), 0, 0])
             self.clientConnection.receiveData('DSP done', retVal)
         # needs to block on the dsp finishing.
 
@@ -330,7 +354,6 @@ class Server(object):
 
 
 if __name__ == '__main__':
-    pyroHost = '10.42.0.175'
-    pyroPort = 7000
-
+    pyroHost = '192.168.0.20'
+    pyroPort = 8005
     Server(pyroHost, pyroPort)
