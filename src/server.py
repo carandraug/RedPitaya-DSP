@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 # Copyright (C) 2015 Tom Parks <thomasparks@outlook.com>
 # Copyright (C) 2017-2018 Tiago Susano Pinto <tiagosusanopinto@gmail.com>
 #
@@ -14,8 +17,6 @@
 # You should have received a copy of the GNU General Public License
 # along with RedPitaya-DSP. If not, see <http://www.gnu.org/licenses/>.
 
-#! /usr/bin/python
-
 import Pyro4
 import subprocess
 import threading
@@ -26,11 +27,9 @@ import struct
 
 import logging
 import traceback
+import unittest
 import sys
 
-def bin(s):
-    ''' Returns the set bits in a positive int as a str.'''
-    return str(s) if s<=1 else bin(s>>1) + str(s&1)
 
 def busy_wait(dt):
     '''Wait without sleeping for higher accuracy.'''
@@ -215,29 +214,33 @@ class Executor(object):
         return int(volts*8192/maxVoltage)
 
     # expect value in analog-to-digital-units (ADUs)
-    def MoveAbsoluteADU(self, channel, value):
-        if channel == 0:
-            self.board.write(Board.offsets['asg_channelA'], value)
-        elif channel == 1:
-            self.board.write(Board.offsets['asg_channelB'], value)
+    def MoveAbsolute(self, line, level):
+        ## Used by cockpit executorHandler via the setAnalog callback
+        if line == 0:
+            self.board.write(Board.offsets['asg_channelA'], int(level))
+        elif line == 1:
+            self.board.write(Board.offsets['asg_channelB'], int(level))
         else:
             raise Exception('Unexpected analog channel! (0 or 1)')
 
-    def ReadPosition(self, channel):
-        if channel == 0:
+    def ReadPosition(self, line):
+        ## Used by cockpit executorHandler via the getAnalog callback
+        if line == 0:
             return int(self.board.read(Board.offsets['asg_channelA']))
-        elif channel == 1:
+        elif line == 1:
             return int(self.board.read(Board.offsets['asg_channelB']))
         else:
             raise Exception('Unexpected analog channel! (0 or 1)')
 
-    def WriteDigital(self, value):
-        dP = value & int('11111111', 2)
-        dN = (value & int('1111111100000000', 2)) >> 8
+    def WriteDigital(self, state):
+        ## Used by cockpit executorHandler via the writeDigital callback
+        dP = state & 0b11111111
+        dN = (state & 0b1111111100000000) >> 8
         self.board.write(Board.offsets['out_pinP'], dP)
         self.board.write(Board.offsets['out_pinN'], dN)
 
     def ReadDigital(self, line=0):
+        ## Used by cockpit executorHandler via the readDigital callback
         if line == 0:
             return self.board.read(Board.offsets['out_pinP'])
         elif line == 1:
@@ -250,12 +253,6 @@ class Executor(object):
 
     def readLed(self, leds):
         self.board.read(Board.offsets['led'])
-
-    def InitProfile(self, numReps):
-        # I'm pretty sure this does not zero the prev values.
-        # is it for allocating space?
-        # self.times, self.digitals, self.analogA, self.analogB = [], [], [], []
-        pass
 
     def profileSet(self, profileStr, digitals, *analogs):
         print("profileset called with")
@@ -312,6 +309,21 @@ class Executor(object):
     def DownloadProfile(self, name = None): # This saves the action table
         self.runner.load(self.actiontable, name)
 
+    def PrepareActions(self, actions, numReps=1):
+        if numReps != 1:
+            ## TODO: not sure what to do about the time deltas when
+            ## the actions need to be repeated.  Should we wait some
+            ## before start again?  Maybe this should be done by the
+            ## client.
+            raise NotImplementedError('only runs one at a time')
+
+        action_table = executor_to_runner_table(actions)
+        self.runner.load(action_table)
+
+
+    def RunActions(self):
+        return self.trigCollect()
+
     def trigCollect(self, wait = True):
         process = self.runner.start()
         if wait:
@@ -329,6 +341,78 @@ class Executor(object):
     def receiveClient(self, uri):
         self.clientConnection = Pyro4.Proxy(uri)
         print(uri)
+
+
+def executor_to_runner_table(executor_table):
+    """Convert from ExecutorDevice actiontable to our Runner"""
+    ## Basically, from the executor we get the state of all lines at
+    ## each point while the runner expects a list of changes to make.
+    ##
+    ## ExecutorDevice passes an actiontable in the form of a list of:
+    ##     `tuple(time_since_t0, digital_mask, analog_values)`
+    ## where `analog_values` is a tuple of analog values for each
+    ## channel.
+    ##
+    ## The Runner expects a list of:
+    ##     `tuple(time_since_t0, line, action)`
+    ##
+    ## where positive line numbers mean digital lines and negative
+    ## numbers mean analog lines.  For digital lines, action must be 0
+    ## or 1 (negative values are also possible to implement wait
+    ## states but we don't cover that yet).  For analog lines, the
+    ## value is up to 14bit integer.
+    runner_table = []
+    digital_state = 0
+    analog_state = [0] * 2
+    for row in executor_table:
+        current_t = row[0]
+
+        wanted_digital_state = row[1]
+        digital_diff = digital_state ^ wanted_digital_state
+        for line in range(8):
+            if (digital_diff >> line) & 0b1:
+                action = (row[1] >> line) & 0b1
+                runner_table.append((current_t, line, action))
+        digital_state = wanted_digital_state
+
+        wanted_analog_state = row[2]
+        for line, target in enumerate(wanted_analog_state):
+            if target != analog_state[line]:
+                ## The number of analog lines are the negative numbers
+                ## (bit complement)
+                runner_table.append((current_t, ~line, target))
+        analog_state = wanted_analog_state
+
+    return runner_table
+
+
+class TestActionTableConversion(unittest.TestCase):
+    def assertConversion(self, executor_table, runner_table):
+        self.assertEqual(executor_to_runner_table(executor_table), runner_table)
+
+    def test_empty(self):
+        self.assertConversion([], [])
+
+    def test_complex(self):
+        executor_table = [
+            (0, 0b0010, (0, 23)),
+            (3, 0b0010, (10, 24)),
+            (4, 0b1011, (10, 24)),
+            (5, 0b0111, (9, 23)),
+        ]
+        runner_table = [
+            (0, 1, 1),
+            (0, -2, 23),
+            (3, -1, 10),
+            (3, -2, 24),
+            (4, 0, 1),
+            (4, 3, 1),
+            (5, 2, 1),
+            (5, 3, 0),
+            (5, -1, 9),
+            (5, -2, 23),
+        ]
+        self.assertConversion(executor_table, runner_table)
 
 # Exposes Executor, through Pyro4
 class Server(object):
