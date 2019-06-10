@@ -364,18 +364,17 @@ def executor_to_runner_table(executor_table):
     runner_table = []
     digital_state = 0
     analog_state = [0] * 2
-    for row in executor_table:
-        current_t = row[0]
+    for current_t, state in executor_table:
+        wanted_digital_state = state[0]
+        wanted_analog_state = state[1]
 
-        wanted_digital_state = row[1]
         digital_diff = digital_state ^ wanted_digital_state
         for line in range(8):
             if (digital_diff >> line) & 0b1:
-                action = (row[1] >> line) & 0b1
+                action = (wanted_digital_state >> line) & 0b1
                 runner_table.append((current_t, line, action))
         digital_state = wanted_digital_state
 
-        wanted_analog_state = row[2]
         for line, target in enumerate(wanted_analog_state):
             if target != analog_state[line]:
                 ## The number of analog lines are the negative numbers
@@ -395,10 +394,10 @@ class TestActionTableConversion(unittest.TestCase):
 
     def test_complex(self):
         executor_table = [
-            (0, 0b0010, (0, 23)),
-            (3, 0b0010, (10, 24)),
-            (4, 0b1011, (10, 24)),
-            (5, 0b0111, (9, 23)),
+            (0, (0b0010, [0, 23])),
+            (3, (0b0010, [10, 24])),
+            (4, (0b1011, [10, 24])),
+            (5, (0b0111, [9, 23])),
         ]
         runner_table = [
             (0, 1, 1),
