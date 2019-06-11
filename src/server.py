@@ -329,7 +329,7 @@ class Executor(object):
         if wait:
             process.wait()
         if self.clientConnection:
-            retVal = (100, [self.ReadPosition(0), self.ReadPosition(1), 0, 0])
+            retVal = (100, [self.ReadPosition(0), self.ReadPosition(1)])
             self.clientConnection.receiveData('DSP done', retVal)
         # needs to block on the dsp finishing.
 
