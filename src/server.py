@@ -310,13 +310,10 @@ class Executor(object):
         self.runner.load(self.actiontable, name)
 
     def PrepareActions(self, actions, numReps=1):
-        if numReps != 1:
-            ## TODO: not sure what to do about the time deltas when
-            ## the actions need to be repeated.  Should we wait some
-            ## before start again?  Maybe this should be done by the
-            ## client.
-            raise NotImplementedError('only runs one at a time')
-
+        ## Do the numReps stuff first because after we convert from
+        ## executor to runner table, a wait action at the end of the
+        ## will get lost.
+        actions = repeat_action_table(actions, numReps)
         action_table = executor_to_runner_table(actions)
         self.runner.load(action_table)
 
@@ -341,6 +338,22 @@ class Executor(object):
     def receiveClient(self, uri):
         self.clientConnection = Pyro4.Proxy(uri)
         print(uri)
+
+
+def repeat_action_table(single_table, num_reps):
+    full_table = []
+    rep_time = single_table[-1][0]
+
+    ## If the last action is waiting, remove it.
+    if single_table[-1][1] == single_table[-2][1]:
+        single_table = single_table.copy()
+        single_table.pop()
+
+    for i in range(num_reps):
+        time_shift = rep_time * i
+        full_table.extend([(r[0]+time_shift, r[1]) for r in single_table])
+
+    return full_table
 
 
 def executor_to_runner_table(executor_table):
@@ -392,7 +405,8 @@ class TestActionTableConversion(unittest.TestCase):
     def test_empty(self):
         self.assertConversion([], [])
 
-    def test_complex(self):
+    def test_complex_conversion(self):
+        ## Not that complex, just many actions in a single row.
         executor_table = [
             (0, (0b0010, [0, 23])),
             (3, (0b0010, [10, 24])),
@@ -412,6 +426,38 @@ class TestActionTableConversion(unittest.TestCase):
             (5, -2, 23),
         ]
         self.assertConversion(executor_table, runner_table)
+
+    def test_repeat_with_wait(self):
+        single_table = [
+            (0.0, (0, [19, 21])),
+            (100.0, (1, [19, 21])),
+            (3000.0, (1, [19, 21])), # wait step
+        ]
+        full_table = [
+            (0.0, (0, [19, 21])),
+            (100.0, (1, [19, 21])),
+            (3000.0, (0, [19, 21])),
+            (3100.0, (1, [19, 21])),
+            (6000.0, (0, [19, 21])),
+            (6100.0, (1, [19, 21])),
+        ]
+        self.assertEqual(repeat_action_table(single_table, 3),
+                         full_table)
+
+    def test_repeats_one(self):
+        """Removes an wait action at the end if there are no repeats"""
+        single_table = [
+            (0.0, (0, [19, 21])),
+            (100.0, (1, [19, 21])),
+            (3000.0, (1, [19, 21])), # wait step
+        ]
+        full_table = [
+            (0.0, (0, [19, 21])),
+            (100.0, (1, [19, 21])),
+        ]
+        self.assertEqual(repeat_action_table(single_table, 1),
+                         full_table)
+
 
 # Exposes Executor, through Pyro4
 class Server(object):
